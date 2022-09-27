@@ -1,0 +1,688 @@
+/*
+##DATABASE##
+##TABLE##
+*/
+
+use	##DATABASE##
+go
+;
+
+create	or	alter	procedure
+	Process.##TABLE##
+
+	@help			bit			=	0
+,	@debug			bit			=	0
+,	@datetime_gmt	datetime	=	null
+
+,	@is_full_load	bit			=	0
+
+as
+
+/*
+	alter	database	##DATABASE##	add	filegroup	fg_##TABLE##;
+	alter	database	##DATABASE##	add	filegroup	fg_##TABLE##_loading;
+	
+	alter	database	##DATABASE##	add	file	(name	=	fi_##TABLE##,	filename	=	'F:\MSSQLServer\Data\fi_##TABLE##.ndf',	size	=	256 mb,	filegrowth	=	256 mb)	to	filegroup	fg_##TABLE##;
+	alter	database	##DATABASE##	add	file	(name	=	fi_##TABLE##_loading,	filename	=	'F:\MSSQLServer\Data\fi_##TABLE##_loading.ndf',	size	=	256 mb,	filegrowth	=	256 mb)	to	filegroup	fg_##TABLE##_loading;
+	
+	create	partition	function	pf_##TABLE##_loading	(datetime)
+		as	range	right	for	values	('2022-09-21 23:00:00.000')
+	;
+	
+	create	partition	function	pf_##TABLE##	(datetime)
+		as	range	right	for	values	('2022-09-21 23:00:00.000')
+	;
+	
+	create	partition	scheme	ps_##TABLE##_loading
+		as	partition	pf_##TABLE##_loading
+		to	(
+				'fg_##TABLE##'
+			,	'fg_##TABLE##_loading'
+			)
+	;
+	
+	create	partition	scheme	ps_##TABLE##
+		as	partition	pf_##TABLE##
+		to	(
+				'fg_##TABLE##'
+			,	'fg_##TABLE##_loading'
+			)
+	;
+
+	drop	table	if	exists
+		##DATABASE##.Input.##TABLE##_loading
+	;
+	
+	create	table
+		##DATABASE##.Input.##TABLE##_loading
+			(
+			,	last_utc_ts					datetime
+			)	on	ps_##TABLE##_loading	(last_utc_ts)
+	;
+	
+	create	clustered	columnstore	index	CCI_##TABLE##_loading	on	##DATABASE##.Input.##TABLE##_loading	on	ps_##TABLE##_loading	(last_utc_ts)
+	;
+	
+	drop	table	if	exists
+		##DATABASE##.Data.##TABLE##
+	;
+	
+	create	table
+		##DATABASE##.Data.##TABLE##
+			(
+			,	last_utc_ts					datetime
+			)	on	ps_##TABLE##	(last_utc_ts)
+	;
+	
+	create	clustered	columnstore	index	CCI_##TABLE##	on	##DATABASE##.Data.##TABLE##	on	ps_##TABLE##	(last_utc_ts)
+	;
+*/
+
+begin
+
+	set	ansi_nulls,	nocount,	xact_abort	on
+	;
+
+	if	@help	=	1
+		
+		begin
+
+			select	'Default parameters:'
+			union	all
+			select	'	@debug	-	can be set to 1 to provide progress log and thrown error information at runtime'
+			union	all
+			select	''
+			union	all
+			select	'Specific parameters:'
+			union	all
+			select	'	@is_full_load	-	default to 0 for incremental partition load process, can be set to 1 to initiate a full load'
+			;
+
+			goto	label_end;
+
+		end
+	;
+
+	if	object_id	(N'tempdb..#temp_rows_to_process')	is	not	null
+		begin
+			drop	table
+				#temp_rows_to_process
+		end
+	;
+
+	declare
+		@progress_log	table
+			(
+				id				int	identity
+			,	progress_at		datetime	default	getdate	()
+			,	message_text	nvarchar	(4000)
+			)
+	;
+
+	declare	@partition_range_values_value	datetime	=	(	select
+																	max	(convert	(datetime,	partition_range_values.value))
+																from
+																				sys.partitions
+																inner	join	sys.indexes	on	partitions.object_id	=	indexes.object_id
+																							and	partitions.index_id	=	indexes.index_id
+																inner	join	sys.objects	on	partitions.object_id	=	objects.object_id
+																inner	join	sys.partition_schemes	on	partition_schemes.data_space_id	=	indexes.data_space_id
+																inner	join	sys.partition_functions	on	partition_schemes.function_id	=	partition_functions.function_id
+																inner	join	sys.partition_range_values	on	partition_functions.function_id	=	partition_range_values.function_id
+																											and	partitions.partition_number	=	partition_range_values.boundary_id
+																where
+																	objects.name	=	'##TABLE##'	)
+	;
+
+	if	datediff	(minute,	@partition_range_values_value,	cast	(getdate	()	at	time	zone	'GMT Standard Time'	at	time	zone	'UTC'	as	datetime))	>	1500
+
+		begin
+
+			begin	try
+
+				begin	transaction
+
+					insert	into	@progress_log	(message_text)
+					values	(N'start partition range change process')
+					;
+
+					exec
+						System.Process.etl_log_status
+							@log_event	=	'Begin partition range change'
+						,	@table_name	=	'##TABLE##'
+						,	@agent_job	=	'##DATABASE## - ##TABLE##'
+					;
+
+					declare	@new_partition_range	datetime	=	(select	cast	(cast	(cast	(getdate	()	as	date)	as	datetime)	at	time	zone	'GMT Standard Time'	at	time	zone	'UTC'	as	datetime))
+					;
+
+					insert	into	@progress_log	(message_text)
+					values	(N'declare new partition range variable')
+					;
+
+					truncate	table
+						##DATABASE##.Data.##TABLE##
+							with	(partitions	(2))	/*	fg_##TABLE##_loading	*/
+					;
+
+					insert	into	@progress_log	(message_text)
+					values	(N'truncate data table incremental partition')
+					;
+
+					alter	partition	scheme	ps_##TABLE##_loading
+						next	used	fg_##TABLE##_loading
+					;
+
+					insert	into	@progress_log	(message_text)
+					values	(N'set next used filegroup on loading partition scheme to incremental filegroup')
+					;
+					
+					alter	partition	function	pf_##TABLE##_loading	()
+						split	range	(@new_partition_range)
+					;
+
+					insert	into	@progress_log	(message_text)
+					values	(N'split range of loading partition function to new partition range')
+					;
+					
+					alter	partition	function	pf_##TABLE##_loading	()
+						merge	range	(@partition_range_values_value)
+					;
+
+					insert	into	@progress_log	(message_text)
+					values	(N'merge old partition range of loading partition function')
+					;
+
+					alter	partition	scheme	ps_##TABLE##
+						next	used	fg_##TABLE##_loading
+					;
+
+					insert	into	@progress_log	(message_text)
+					values	(N'set next used filegroup on main partition scheme to incremental filegroup')
+					;
+					
+					alter	partition	function	pf_##TABLE##	()
+						split	range	(@new_partition_range)
+					;
+
+					insert	into	@progress_log	(message_text)
+					values	(N'split range of main partition function to new partition range')
+					;
+					
+					alter	partition	function	pf_##TABLE##	()
+						merge	range	(@partition_range_values_value)
+					;
+
+					insert	into	@progress_log	(message_text)
+					values	(N'merge old partition range of main partition function')
+					;
+				
+					insert	into	@progress_log	(message_text)
+					values	(N'partition range change process complete')
+					;
+
+					exec
+						System.Process.etl_log_status
+							@log_event	=	'Complete partition range change'
+						,	@table_name	=	'##TABLE##'
+						,	@agent_job	=	'##DATABASE## - ##TABLE##'
+					;
+
+				commit	transaction
+
+			end	try
+
+			begin	catch
+
+				if	@@trancount	>	0
+					rollback
+				;
+
+				if	@debug	=	1
+
+					begin
+
+						select	*
+						from	@progress_log
+						;
+
+						throw
+						;
+
+					end
+					
+					else
+
+					begin	transaction
+
+						insert	into
+							System.System.etl_error_log_stored_procedure
+								(
+									error_number
+								,	error_severity
+								,	error_state
+								,	error_procedure
+								,	error_line
+								,	error_message
+								,	table_name
+								,	agent_job
+								)
+						select
+							error_number	()
+						,	error_severity	()
+						,	error_state	()
+						,	error_procedure	()
+						,	error_line	()
+						,	error_message	()
+						,	'##TABLE##'
+						,	'##DATABASE## - ##TABLE##'
+						;
+
+						exec
+							System.Process.etl_log_status
+								@log_event	=	'Fail partition range change'
+							,	@table_name	=	'##TABLE##'
+							,	@agent_job	=	'##DATABASE## - ##TABLE##'
+						;
+					
+					commit	transaction
+
+			end	catch
+
+		end
+
+	if	@is_full_load	=	0
+
+		begin
+
+			goto	label_incremental_load;
+
+		end
+
+		begin
+
+			begin	try
+
+				begin	transaction
+
+					insert	into	@progress_log	(message_text)
+					values	(N'full load process')
+					;
+
+					insert	into	@progress_log	(message_text)
+					values	(N'start populate Input. _loading process')
+					;
+
+					exec
+						System.Process.etl_log_status
+							@log_event	=	'Begin full load'
+						,	@table_name	=	'##TABLE##'
+						,	@agent_job	=	'##DATABASE## - ##TABLE##'
+					;
+
+					truncate	table
+						##DATABASE##.Input.##TABLE##_loading
+					;
+
+					insert	into	@progress_log	(message_text)
+					values	(N'truncate Input. _loading table')
+					;
+
+					insert	into
+						##DATABASE##.Input.##TABLE##_loading
+
+					/*
+						QUERY
+					*/
+
+					/*
+						INDEXES
+					*/
+
+					insert	into	@progress_log	(message_text)
+					values	(N'inserted into Input. _loading table')
+					;
+
+					insert	into	@progress_log	(message_text)
+					values	(N'populate Input. _loading process complete')
+					;
+
+				commit	transaction
+
+				begin	transaction
+
+					insert	into	@progress_log	(message_text)
+					values	(N'start populate Data. main process')
+					;
+
+					truncate	table
+						##DATABASE##.Data.##TABLE##
+					;
+
+					insert	into	@progress_log	(message_text)
+					values	(N'truncate Data. main table')
+					;
+
+					alter	table
+						##DATABASE##.Input.##TABLE##_loading
+							switch	partition	1	/*	fg_##TABLE##	*/	to	##DATABASE##.Data.##TABLE##	partition	1	/*	fg_##TABLE##	*/
+					;
+
+					insert	into	@progress_log	(message_text)
+					values	(N'switch main partition filegroup from Input. _loading table to Data. main table')
+					;
+
+					alter	table
+						##DATABASE##.Input.##TABLE##_loading	
+							switch	partition	2	/*	fg_##TABLE##_loading	*/	to	##DATABASE##.Data.##TABLE##	partition	2	/*	fg_##TABLE##_loading	*/
+					;
+
+					insert	into	@progress_log	(message_text)
+					values	(N'switch incremental partition filegroup from Input. _loading table to Data. main table')
+					;
+
+					insert	into	@progress_log	(message_text)
+					values	(N'populate Data. main process complete')
+					;
+
+					exec
+						System.Process.etl_log_status
+							@log_event	=	'Complete full load'
+						,	@table_name	=	'##TABLE##'
+						,	@agent_job	=	'##DATABASE## - ##TABLE##'
+					;
+
+				commit	transaction
+
+			end	try
+
+			begin	catch
+				
+				if	@@trancount	>	0
+					rollback
+				;
+
+				if	@debug	=	1
+
+					begin
+
+						select	*
+						from	@progress_log
+						;
+
+						throw
+						;
+
+					end
+					
+					else
+
+					begin	transaction
+
+						insert	into
+							System.System.etl_error_log_stored_procedure
+								(
+									error_number
+								,	error_severity
+								,	error_state
+								,	error_procedure
+								,	error_line
+								,	error_message
+								,	table_name
+								,	agent_job
+								)
+						select
+							error_number	()
+						,	error_severity	()
+						,	error_state	()
+						,	error_procedure	()
+						,	error_line	()
+						,	error_message	()
+						,	'##TABLE##'
+						,	'##DATABASE## - ##TABLE##'
+						;
+
+						exec
+							System.Process.etl_log_status
+								@log_event	=	'Fail full load'
+							,	@table_name	=	'##TABLE##'
+							,	@agent_job	=	'##DATABASE## - ##TABLE##'
+						;
+					
+					commit	transaction
+
+			end	catch
+
+		end
+
+		goto	label_end;
+
+	label_incremental_load:
+
+		begin	try
+
+			begin	transaction
+
+				insert	into	@progress_log	(message_text)
+				values	(N'incremental load process')
+				;
+
+				insert	into	@progress_log	(message_text)
+				values	(N'start populate Input. _loading process')
+				;
+
+				exec
+					System.Process.etl_log_status
+						@log_event	=	'Begin incremental load'
+					,	@table_name	=	'##TABLE##'
+					,	@agent_job	=	'##DATABASE## - ##TABLE##'
+				;
+
+				truncate	table
+					##DATABASE##.Input.##TABLE##_loading
+				;
+
+				insert	into	@progress_log	(message_text)
+				values	(N'truncate Input. _loading table')
+				;
+
+				select
+					
+				into
+					#temp_rows_to_process
+				from
+					/*
+						QUERY
+					*/
+				where
+					LAST_UTC_TS	>=	@partition_range_values_value
+
+				union
+
+				select
+					
+				from
+					/*
+						QUERY
+					*/
+				where
+					LAST_UTC_TS	>=	@partition_range_values_value
+				;
+
+				/*
+					INDEXES
+				*/
+
+				insert	into
+					@progress_log	(message_text)
+				values	(N'inserted into #temp_rows_to_process temp table')
+				;
+
+				insert	into
+					##DATABASE##.Input.##TABLE##_loading
+
+				/*
+					QUERY
+								#temp_rows_to_process
+				inner	join		on	#temp_rows_to_process.	=	
+				*/
+
+				insert	into	@progress_log	(message_text)
+				values	(N'inserted into Input. _loading table')
+				;
+
+				insert	into	@progress_log	(message_text)
+				values	(N'populate Input. _loading process complete')
+				;
+
+			commit	transaction
+
+			begin	transaction
+
+				insert	into	@progress_log	(message_text)
+				values	(N'start populate Data. main process')
+				;
+
+				truncate	table
+					##DATABASE##.Data.##TABLE##
+						with	(partitions	(2))	/*	fg_##TABLE##_loading	*/
+				;
+
+				insert	into	@progress_log	(message_text)
+				values	(N'truncate incremental partition filegroup from Data. main table')
+				;
+
+				delete	from
+						##DATABASE##.Data.##TABLE##
+					where	exists
+						(	select	1
+							from	#temp_rows_to_process
+							where	#temp_rows_to_process.	=	##TABLE##.	)
+				;
+				
+				insert	into	@progress_log	(message_text)
+				values	(N'delete updated rows from Data. main table')
+				;
+				
+				alter	table
+					##DATABASE##.Input.##TABLE##_loading
+						switch	partition	2	/*	fg_##TABLE##_loading	*/	to	##DATABASE##.Data.##TABLE##	partition	2	/*	fg_##TABLE##_loading	*/
+				;
+				
+				insert	into	@progress_log	(message_text)
+				values	(N'switch incremental partition filegroup from Input. _loading table to Data. main table')
+				;
+				
+				insert	into
+					##DATABASE##.Data.##TABLE##
+
+				select
+					*
+				from
+					##DATABASE##.Input.##TABLE##_loading
+				;
+
+				insert	into	@progress_log	(message_text)
+				values	(N'inserted into Data. main table from Input. _loading table')
+				;
+
+				insert	into	@progress_log	(message_text)
+				values	(N'populate Data. main process complete')
+				;
+
+				exec
+					System.Process.etl_log_status
+						@log_event	=	'Complete incremental load'
+					,	@table_name	=	'##TABLE##'
+					,	@agent_job	=	'##DATABASE## - ##TABLE##'
+				;
+
+			commit	transaction
+
+		end	try
+
+		begin	catch
+
+			if	@@trancount	>	0
+				rollback
+			;
+
+			if	@debug	=	1
+
+				begin
+
+					select	*
+					from	@progress_log
+					;
+
+					throw
+					;
+
+				end
+				
+				else
+
+				begin	transaction
+
+					insert	into
+						System.System.etl_error_log_stored_procedure
+							(
+								error_number
+							,	error_severity
+							,	error_state
+							,	error_procedure
+							,	error_line
+							,	error_message
+							,	table_name
+							,	agent_job
+							)
+					select
+						error_number	()
+					,	error_severity	()
+					,	error_state	()
+					,	error_procedure	()
+					,	error_line	()
+					,	error_message	()
+					,	'##TABLE##'
+					,	'##DATABASE## - ##TABLE##'
+					;
+
+					exec
+						System.Process.etl_log_status
+							@log_event	=	'Fail incremental load'
+						,	@table_name	=	'##TABLE##'
+						,	@agent_job	=	'##DATABASE## - ##TABLE##'
+					;
+				
+				commit	transaction
+
+		end	catch
+
+	label_end:
+
+		if	@help	=	1
+
+			begin
+				
+				return;
+
+			end
+		;
+
+		if	@debug	=	1
+
+			begin
+				
+				insert	into	@progress_log	(message_text)
+				values	(N'process complete')
+				;
+
+				select	*
+				from	@progress_log
+				order	by	id
+				;
+
+			end
+		;
+
+end
