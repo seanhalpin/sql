@@ -7,7 +7,7 @@ select
 
 /*	Maximum value from columns on the same row	*/
 
-,	(select max (v) from  (values (##COLUMN_1##, ##COLUMN_2##,  ##COLUMN_3##) as  value (v))  as  'max_##COLUMN##_at'
+,	(select max (v) from  (values (##COLUMN_1##), (##COLUMN_2##),  (##COLUMN_3##)) as  value (v))  as  'max_##COLUMN##_at'
 
 
 /*  Timezone UTC to local as datetime */
